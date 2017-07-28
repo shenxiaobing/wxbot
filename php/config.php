@@ -22,7 +22,7 @@ $config = array(
 		't_reminder' => '教师提醒',
 		'accompany' => '陪伴',
 		'evaluate' => '评价',
-		'photo_start' => 'start',
+		'photo_start' => '轨迹图片',
 		'gourp_start' => '开篇语',
 		'gourp_end' => '结束语',
 	),

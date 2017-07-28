@@ -12,61 +12,90 @@ $webApi = new webApi($config['api_url']);
 while(true) {
 	//从队列中获取第一条数据并阻塞队列
 	$data = $redis->blpop($config['list_name'], 3);
-	
 	if(!$data){
 		//break;
 		continue;
 	}
-
 	$msg = json_decode($data[1],true);
+	//var_dump($msg);
 
-	$group_name = htmlspecialchars($redis->get($msg['bot_id'].'-'.$msg['msg']['user']['id']));
-	$username = htmlspecialchars($redis->get($msg['bot_id'].'-'.$msg['msg']['content']['user']['id']));
-	$wx_name = htmlspecialchars($redis->get($msg['bot_id'].'-name'));
-	if($wx_name){
-		$msg['msg']['wx_name'] = $wx_name;
-	}else{
-		$msg['msg']['wx_name'] = 'unknown';
+	//当消息不是群消息时不处理
+	if($msg['msg']['msg_type_id'] != 3){
+		//break;
+		continue;
 	}
+
+	//当消息不是文字图片语音时不处理
+	if(in_array($msg['msg']['content']['type'],array(0,4,3)) === false){
+		//break;
+		continue;
+	}
+
+	//保存媒体文件
+	if($msg['msg']['content']['type'] == 3 || $msg['msg']['content']['type'] == 4){
+		$type = $msg['msg']['content']['type'];
+		$media_str = ($type == 3) ? $msg['msg']['content']['img'] : $msg['msg']['content']['voice'];
+		$msg['msg']['content']['data'] = save_media($type,$media_str);
+	}
+
+	//从缓存中获取群名称，用户名称，微信名称
+	$group_name = htmlspecialchars($redis->get($msg['bot_id'].'-'.$msg['msg']['user']['id']));//群名称
+	$username = htmlspecialchars($redis->get($msg['bot_id'].'-'.$msg['msg']['content']['user']['id']));//用户名称
+	$wx_name = htmlspecialchars($redis->get($msg['bot_id'].'-name'));//微信用户名称
+	$msg['msg']['wx_name'] = $wx_name ? $wx_name : 'unknown';
+
 	if(!$group_name || !$username){
 		continue;
 	}
-	if($group_name){
-		$msg['msg']['user']['name'] = $group_name;
-	}
-	if($username){
-		$msg['msg']['content']['user']['name'] = $username;
-	}
-	//var_dump($msg);
-	
-	//获取群名称
-	/*$groupList = getApiRedis($msg['bot_id'],'getGroupList');
-
-	//当群组未添加到群聊中则忽略该条消息
-	if(!isset($groupList[$msg['msg']['user']['id']])){
-		//break;
-		//continue;
-	}*/
-
-	//获取群用户
-	//$groupMembers = getApiRedis($msg['bot_id'],'getGroupMembers');
+	$msg['msg']['user']['name'] = $group_name;
+	$msg['msg']['content']['user']['name'] = $username;
 
 	//添加消息到数据库
 	$res = addData($msg);
-	if($res['code'] != 200){
-		//break;
-		continue;
-	}
 
-	$r = sendApi($msg['msg'],$res,$config['filter_key']);
+	//发送数据到接口
+	$r = sendApi($msg['msg'],$config['filter_key']);
 	
 	//break;
 }
 
-function sendApi($msg,$res,$config){
+function save_media($type,$media_str){
+	if($type == 3){
+		$jpg = hex2bin($media_str);
+
+		$dirname = "./media/img/".date('Y-m-d',time());
+		$filename = '/'.date("YmdHis",time()).rand(1000,9999).'.jpg';
+		if(!file_exists($dirname)){
+			mkdir ($dirname);
+		} 	
+		$file = fopen($dirname.$filename,"w");//打开文件准备写入  
+		fwrite($file,$jpg);//写入  
+		fclose($file);//关闭
+		
+		$data = $dirname.$filename;
+		
+	}else if($type == 4){
+		$jpg = hex2bin($media_str);
+		$dirname = "./media/voice/".date('Y-m-d',time());
+		$filename = '/'.date("YmdHis",time()).rand(1000,9999).'.mp3';
+		if(!file_exists($dirname)){
+			mkdir ($dirname);
+		} 
+		$file = fopen($dirname.$filename,"w");//打开文件准备写入  
+		fwrite($file,$jpg);//写入  
+		fclose($file);//关闭
+		
+		$data = $dirname.$filename;
+	}
+
+	return $data;
+}
+
+function sendApi($msg,$config){
 	global $redis;
 	$uid = $msg['content']['user']['id'];
 	$name = $msg['content']['user']['name'];
+	$group_id = $msg['user']['id'];
 	$group_name = $msg['user']['name'];
 	$data = $msg['content']['data'];
 	$type = 0;
@@ -79,9 +108,9 @@ function sendApi($msg,$res,$config){
 	}else if(strpos($msg['content']['data'],$config['evaluate']) !== false){
 		$type = 4;
 	}else if(strpos($msg['content']['data'],$config['photo_start']) !== false){
-		echo $uid."-start";
-		$redis->set($uid.'-photo', '');
-		$redis->set($uid.'-photo-count', 0);
+		$key = md5($group_id.'-'.$uid);
+		$redis->setex($key.'-photo',600, '');
+		$redis->setex($key.'-photo-count',600, 0);
 	}else if(strpos($msg['content']['data'],$config['gourp_start']) !== false){
 		$type = 5;
 	}else if(strpos($msg['content']['data'],$config['gourp_end']) !== false){
@@ -89,19 +118,18 @@ function sendApi($msg,$res,$config){
 	}
 
 	if($msg['content']['type'] == 3){
-		$str = $redis->get($uid.'-photo');
-		$count = $redis->get($uid.'-photo-count');
+		$key = md5($group_id.'-'.$uid);
+		$str = $redis->get($key.'-photo');
+		$count = $redis->get($key.'-photo-count');
 		if($str !== false && $count !== false){
 			if($count == 2){
-				echo $uid."-del";
-				$redis->del($uid.'-photo');
-				$redis->del($uid.'-photo-count');
+				$redis->del($key.'-photo');
+				$redis->del($key.'-photo-count');
 				$type = 5;
-				$data = $str;
+				$data = $str.','.$data;
 			}else{
-				echo $uid."-add";
-				$redis->set($uid.'-photo', $str.','.$res['data']);
-				$redis->set($uid.'-photo-count', $count+1);
+				$redis->setex($key.'-photo',600, $str.','.$data);
+				$redis->setex($key.'-photo-count',600, $count+1);
 				return false;
 			}
 		}else{
@@ -125,12 +153,7 @@ function sendApi($msg,$res,$config){
  */
 function addData($msg){
 	global $db;
-	global $webApi;
-	global $redis;
-	$r = array(
-		'code' => 200,
-		'data' => array()
-	);
+	
 	$gourp_id = $msg['msg']['user']['id'];
 	$group_name = $msg['msg']['user']['name'];
 	$msg_id = $msg['msg']['msg_id'];
@@ -140,51 +163,11 @@ function addData($msg){
 	$data_type = $msg['msg']['content']['type'];
 	$data = $msg['msg']['content']['data'];
 	$wx_name = $msg['msg']['wx_name'];
-	if($msg_type_id != 3){
-		$r['code'] = 201;
-		return $r;
-	}
-	if(in_array($data_type,array(0,4,3)) === false){
-		$r['code'] = 201;
-		return $r;
-	}
 
-	if($data_type == 3){
-		$jpg = hex2bin($msg['msg']['content']['img']);
-
-		$dirname = "./media/img/".date('Y-m-d',time());
-		$filename = '/'.date("YmdHis",time()).rand(1000,9999).'.jpg';
-		if(!file_exists($dirname)){
-			mkdir ($dirname);
-		} 	
-		$file = fopen($dirname.$filename,"w");//打开文件准备写入  
-		fwrite($file,$jpg);//写入  
-		fclose($file);//关闭
-		
-		$data = $filename;
-		$r['data'] = $filename;
-		
-	}else if($data_type == 4){
-		$jpg = hex2bin($msg['msg']['content']['voice']);
-		$dirname = "./media/voice/".date('Y-m-d',time());
-		$filename = '/'.date("YmdHis",time()).rand(1000,9999).'.mp3';
-		if(!file_exists($dirname)){
-			mkdir ($dirname);
-		} 
-		$file = fopen($dirname.$filename,"w");//打开文件准备写入  
-		fwrite($file,$jpg);//写入  
-		fclose($file);//关闭
-		
-		$data = $filename;
-		$r['data'] = $filename;
-	}
 	$sql = 'insert into msg(wx_name,gourp_id,gourp_name,msg_id,msg_type_id,user_id,username,data_type,`data`,create_time) values("'.$wx_name.'","'.$gourp_id.'","'.$group_name.'","'.$msg_id.'",'.$msg_type_id.',"'.$user_id.'","'.$username.'",'.$data_type.',"'.$data.'",'.time().')';
 
 	$result = $db->exec($sql);
-	if(!$result){
-		$r['code'] = 201;
-	}
-	return $r;
+	return $result;
 }
 
 
